@@ -27,7 +27,9 @@ PRE="${PROC_DIR}/${DATASET}_pre.jsonl"
 mkdir -p "${PROC_DIR}" results/logs
 
 echo "==================== 1. preprocess (${DATASET}) ===================="
-python src/preprocess.py --input "${RAW}" --dataset "${DATASET}" --out "${PRE}"
+# D14: node_card granularity (R0X-MX-NX). Use full for the sensitivity run.
+python src/preprocess.py --input "${RAW}" --dataset "${DATASET}" --out "${PRE}" \
+  --node-level node_card
 
 echo "==================== 2. gate 3 - tokenizer ===================="
 for V in 8000 12000 16000; do
