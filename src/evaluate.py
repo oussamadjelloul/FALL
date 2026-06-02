@@ -1,9 +1,17 @@
 """evaluate.py - FALL reproduction evaluation (Table XI / Table VIII, BGL).
 
-Loads each trained discriminator, scores test windows with D10 cross-segment
-pooling (RTD sigmoid probs concatenated across a window's segments), and reports
-AUC-ROC + avg-FP at the D7 val-normal threshold, per scoring mode, aggregated
-mean+-std over seeds.
+Loads each trained discriminator, scores test windows, and reports AUC-ROC +
+avg-FP at the D7 val-normal threshold, per scoring mode, mean+-std over seeds.
+
+Score unit (length-confound fix):
+  segment (default) - score each <=128-token segment on its own (sharpen within
+                      the segment), then average the segment scores per window.
+                      Paper's "split and process sequentially": bounds the
+                      sharpening normalization length so the score does not
+                      collapse to 1/L (window length).
+  pooled            - old behaviour: concatenate all of a window's segment probs
+                      into one vector and sharpen over the whole window, which
+                      lets window length leak into the score (1/L artifact).
 
 Scoring modes (all from the SAME checkpoints, no retraining):
   fall          primary (D6: sharpen T=1/2 + top-(1/n) mean)
@@ -70,10 +78,10 @@ def build_segments(windows, tok, cls, sep, pad, max_len=MAX_LEN):
 
 
 @torch.no_grad()
-def window_prob_vectors(model, input_ids, content_len, win_id, n_win, device,
-                        batch=256):
-    """One pooled RTD-probability vector per window (D10): sigmoid RTD probs at
-    content positions, concatenated across the window's segments."""
+def window_segment_probs(model, input_ids, content_len, win_id, n_win, device,
+                         batch=256):
+    """Per window, a LIST of per-segment RTD-probability vectors (NOT pooled).
+    Each vector is the sigmoid RTD probs at that segment's content positions."""
     pos = torch.arange(MAX_LEN).unsqueeze(0)
     buckets = [[] for _ in range(n_win)]
     model.eval()
@@ -86,26 +94,35 @@ def window_prob_vectors(model, input_ids, content_len, win_id, n_win, device,
         for r in range(ii.size(0)):
             c = int(cl[r])
             buckets[int(win_id[s + r])].append(probs[r, 1:1 + c])
-    return [torch.cat(b) if b else torch.zeros(1) for b in buckets]
+    return [b if b else [torch.zeros(1)] for b in buckets]
 
 
-def score_windows(prob_vecs, mode, n, T):
+def _apply(fn, mode, vec, n, T):
+    if mode in ("fall", "fall_sum"):
+        return fn(vec, n=n, T=T)
+    if mode == "sharpen_only":
+        return fn(vec, T=T)
+    if mode == "partial_only":
+        return fn(vec, n=n)
+    return fn(vec)
+
+
+def score_windows(win_segs, mode, n, T, unit):
+    """unit='segment': score each segment, average per window (length-neutral).
+       unit='pooled'  : concatenate a window's segments, score once (old)."""
     fn = S.SCORERS[mode]
     out = []
-    for p in prob_vecs:
-        if mode in ("fall", "fall_sum"):
-            out.append(fn(p, n=n, T=T))
-        elif mode == "sharpen_only":
-            out.append(fn(p, T=T))
-        elif mode == "partial_only":
-            out.append(fn(p, n=n))
+    for segs in win_segs:
+        if unit == "pooled":
+            out.append(_apply(fn, mode, torch.cat(segs), n, T))
         else:
-            out.append(fn(p))
+            seg_scores = [_apply(fn, mode, seg, n, T) for seg in segs]
+            out.append(sum(seg_scores) / len(seg_scores))
     return out
 
 
 def evaluate_seed(ckpt_path, val_w, test_w, tok, cls, sep, pad, modes, n, T,
-                  pct, device):
+                  pct, unit, device):
     ck = torch.load(ckpt_path, map_location=device, weights_only=False)
     cfg = ck["config"]
     model = Discriminator(cfg["vocab"], d_model=cfg["d_model"], nhead=cfg["nhead"],
@@ -116,14 +133,14 @@ def evaluate_seed(ckpt_path, val_w, test_w, tok, cls, sep, pad, modes, n, T,
 
     v_ii, v_cl, v_wid, v_lab = build_segments(val_w, tok, cls, sep, pad)
     t_ii, t_cl, t_wid, t_lab = build_segments(test_w, tok, cls, sep, pad)
-    v_probs = window_prob_vectors(model, v_ii, v_cl, v_wid, len(val_w), device)
-    t_probs = window_prob_vectors(model, t_ii, t_cl, t_wid, len(test_w), device)
+    v_probs = window_segment_probs(model, v_ii, v_cl, v_wid, len(val_w), device)
+    t_probs = window_segment_probs(model, t_ii, t_cl, t_wid, len(test_w), device)
     v_labels, t_labels = v_lab.tolist(), t_lab.tolist()
 
     res = {}
     for mode in modes:
-        v_scores = score_windows(v_probs, mode, n, T)
-        t_scores = score_windows(t_probs, mode, n, T)
+        v_scores = score_windows(v_probs, mode, n, T, unit)
+        t_scores = score_windows(t_probs, mode, n, T, unit)
         v_normal = [sc for sc, y in zip(v_scores, v_labels) if y == 0]
         thr = S.threshold_at_percentile(v_normal, pct)
         t_normal = [sc for sc, y in zip(t_scores, t_labels) if y == 0]
@@ -141,6 +158,9 @@ def main():
     ap.add_argument("--ckpt-dir", required=True)
     ap.add_argument("--seeds", default="0,1,2")
     ap.add_argument("--modes", default="fall,date,sharpen_only,partial_only")
+    ap.add_argument("--score-unit", dest="unit", default="segment",
+                    choices=["segment", "pooled"],
+                    help="segment (fix, default) or pooled (old, length-leaking)")
     ap.add_argument("--n", type=int, default=4)
     ap.add_argument("--T", type=float, default=0.5)
     ap.add_argument("--pct", type=float, default=99.0)
@@ -157,13 +177,13 @@ def main():
     for seed in (int(x) for x in args.seeds.split(",")):
         ckpt = os.path.join(args.ckpt_dir, f"{args.scenario}_seed{seed}.pt")
         res = evaluate_seed(ckpt, val_w, test_w, tok, cls, sep, pad, modes,
-                            args.n, args.T, args.pct, args.device)
+                            args.n, args.T, args.pct, args.unit, args.device)
         for m, (auc, fp, _) in res.items():
             per[m]["auc"].append(auc)
             per[m]["fp"].append(fp)
 
     print(f"[{args.scenario}] test windows={len(test_w)} pos={n_pos} "
-          f"neg={len(test_w) - n_pos}  seeds={args.seeds}")
+          f"neg={len(test_w) - n_pos}  seeds={args.seeds}  score_unit={args.unit}")
     print(f"{'mode':>14} {'AUC-ROC':>18} {'avg-FP':>16}")
     for m in modes:
         a, f = per[m]["auc"], per[m]["fp"]
