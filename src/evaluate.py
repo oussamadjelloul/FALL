@@ -203,9 +203,10 @@ def main():
             per[m]["ach"].append(ach)
 
     tpr_pct = int(round(args.tpr * 100))
+    fp_hdr = f"avg-FP({args.pct:g}pct)"
     print(f"[{args.scenario}] test windows={len(test_w)} pos={n_pos} "
           f"neg={len(test_w) - n_pos}  seeds={args.seeds}  score_unit={args.unit}")
-    print(f"{'mode':>14} {'AUC-ROC':>18} {'avg-FP(99pct)':>18} "
+    print(f"{'mode':>14} {'AUC-ROC':>18} {fp_hdr:>18} "
           f"{'FP@'+str(tpr_pct)+'%TPR':>16} {'recall':>8}")
     for m in modes:
         a, f, ft, ac = per[m]["auc"], per[m]["fp"], per[m]["fpt"], per[m]["ach"]
