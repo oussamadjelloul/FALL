@@ -1,21 +1,23 @@
 """evaluate.py - FALL reproduction evaluation (Table XI / Table VIII, BGL).
 
-Loads each trained discriminator, scores test windows, and reports AUC-ROC +
-avg-FP at the D7 val-normal threshold, per scoring mode, mean+-std over seeds.
+Loads each trained discriminator, scores test windows, and reports AUC-ROC plus
+two false-positive figures per scoring mode, mean+-std over seeds:
+  avg-FP        FP at the D7 threshold (99th pct of val-normal scores).
+  FP@<tpr>      FP at a threshold set so the mode catches a fixed fraction (tpr)
+                of the actual failures. This matched-recall operating point makes
+                FP directly comparable across modes (date/partial_only/fall), and
+                is the test for whether selective tokens reduce FP (Table IX).
 
 Score unit (length-confound fix):
-  segment (default) - score each <=128-token segment on its own (sharpen within
-                      the segment), then average the segment scores per window.
-                      Paper's "split and process sequentially": bounds the
-                      sharpening normalization length so the score does not
-                      collapse to 1/L (window length).
+  segment (default) - score each <=128-token segment on its own, then average the
+                      segment scores per window. Bounds the sharpening length so
+                      the score does not collapse to 1/L (window length).
   pooled            - old behaviour: concatenate all of a window's segment probs
-                      into one vector and sharpen over the whole window, which
-                      lets window length leak into the score (1/L artifact).
+                      and sharpen over the whole window (1/L leak).
 
 Scoring modes (all from the SAME checkpoints, no retraining):
   fall          primary (D6: sharpen T=1/2 + top-(1/n) mean)
-  date          baseline B.1.1 (mean of RTD probs, no sharpen/partial)
+  date          baseline B.1.1 (mean of RTD probs)
   sharpen_only  ablation B.1.2
   partial_only  ablation B.1.3
   fall_sum      hedge B.2.2 (top-m sum)
@@ -23,12 +25,13 @@ Scoring modes (all from the SAME checkpoints, no retraining):
 Usage:
   python src/evaluate.py --windows-dir data/processed/bgl --scenario s1 \
       --tokenizer data/processed/bgl/bgl_tok_8000.json \
-      --ckpt-dir results/ckpt/bgl --seeds 0,1,2
+      --ckpt-dir results/ckpt/bgl --seeds 0,1,2 --tpr 0.95
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import statistics
 
@@ -53,8 +56,6 @@ def load_windows(path):
 
 
 def build_segments(windows, tok, cls, sep, pad, max_len=MAX_LEN):
-    """Returns input_ids[Nseg,L], content_len[Nseg], win_id[Nseg], labels[Nwin].
-    Mirrors train.SegmentPool layout (D9/D10) but tracks the source window."""
     budget = max_len - 2
     rows, clens, wid, labels = [], [], [], []
     for w_i, w in enumerate(windows):
@@ -80,8 +81,7 @@ def build_segments(windows, tok, cls, sep, pad, max_len=MAX_LEN):
 @torch.no_grad()
 def window_segment_probs(model, input_ids, content_len, win_id, n_win, device,
                          batch=256):
-    """Per window, a LIST of per-segment RTD-probability vectors (NOT pooled).
-    Each vector is the sigmoid RTD probs at that segment's content positions."""
+    """Per window, a LIST of per-segment RTD-probability vectors (NOT pooled)."""
     pos = torch.arange(MAX_LEN).unsqueeze(0)
     buckets = [[] for _ in range(n_win)]
     model.eval()
@@ -108,8 +108,6 @@ def _apply(fn, mode, vec, n, T):
 
 
 def score_windows(win_segs, mode, n, T, unit):
-    """unit='segment': score each segment, average per window (length-neutral).
-       unit='pooled'  : concatenate a window's segments, score once (old)."""
     fn = S.SCORERS[mode]
     out = []
     for segs in win_segs:
@@ -121,8 +119,24 @@ def score_windows(win_segs, mode, n, T, unit):
     return out
 
 
+def fp_at_tpr(scores, labels, target_tpr):
+    """FP count when the threshold is set to catch >= target_tpr of failures.
+    Returns (fp, achieved_tpr). Threshold = the (1-target) lower quantile of the
+    positive scores; FP = normal windows scoring at or above it."""
+    pos = sorted(sc for sc, y in zip(scores, labels) if y == 1)
+    neg = [sc for sc, y in zip(scores, labels) if y == 0]
+    if not pos or not neg:
+        return float("nan"), float("nan")
+    k = int(math.floor((1.0 - target_tpr) * len(pos)))
+    k = min(max(k, 0), len(pos) - 1)
+    thr = pos[k]
+    tp = sum(1 for s in pos if s >= thr)
+    fp = sum(1 for s in neg if s >= thr)
+    return fp, tp / len(pos)
+
+
 def evaluate_seed(ckpt_path, val_w, test_w, tok, cls, sep, pad, modes, n, T,
-                  pct, unit, device):
+                  pct, unit, tpr, device):
     ck = torch.load(ckpt_path, map_location=device, weights_only=False)
     cfg = ck["config"]
     model = Discriminator(cfg["vocab"], d_model=cfg["d_model"], nhead=cfg["nhead"],
@@ -146,7 +160,8 @@ def evaluate_seed(ckpt_path, val_w, test_w, tok, cls, sep, pad, modes, n, T,
         t_normal = [sc for sc, y in zip(t_scores, t_labels) if y == 0]
         auc = S.auc_roc(t_scores, t_labels)
         fp = S.false_positives(t_normal, thr)
-        res[mode] = (auc, fp, len(t_normal))
+        fp_t, ach = fp_at_tpr(t_scores, t_labels, tpr)
+        res[mode] = (auc, fp, fp_t, ach, len(t_normal))
     return res
 
 
@@ -161,6 +176,8 @@ def main():
     ap.add_argument("--score-unit", dest="unit", default="segment",
                     choices=["segment", "pooled"],
                     help="segment (fix, default) or pooled (old, length-leaking)")
+    ap.add_argument("--tpr", type=float, default=0.95,
+                    help="target recall for the matched-TPR false-positive count")
     ap.add_argument("--n", type=int, default=4)
     ap.add_argument("--T", type=float, default=0.5)
     ap.add_argument("--pct", type=float, default=99.0)
@@ -173,25 +190,34 @@ def main():
     val_w = load_windows(os.path.join(args.windows_dir, args.scenario, "val.jsonl"))
     test_w = load_windows(os.path.join(args.windows_dir, args.scenario, "test.jsonl"))
     n_pos = sum(int(w["label"]) for w in test_w)
-    per = {m: {"auc": [], "fp": []} for m in modes}
+    per = {m: {"auc": [], "fp": [], "fpt": [], "ach": []} for m in modes}
     for seed in (int(x) for x in args.seeds.split(",")):
         ckpt = os.path.join(args.ckpt_dir, f"{args.scenario}_seed{seed}.pt")
         res = evaluate_seed(ckpt, val_w, test_w, tok, cls, sep, pad, modes,
-                            args.n, args.T, args.pct, args.unit, args.device)
-        for m, (auc, fp, _) in res.items():
+                            args.n, args.T, args.pct, args.unit, args.tpr,
+                            args.device)
+        for m, (auc, fp, fpt, ach, _) in res.items():
             per[m]["auc"].append(auc)
             per[m]["fp"].append(fp)
+            per[m]["fpt"].append(fpt)
+            per[m]["ach"].append(ach)
 
+    tpr_pct = int(round(args.tpr * 100))
     print(f"[{args.scenario}] test windows={len(test_w)} pos={n_pos} "
           f"neg={len(test_w) - n_pos}  seeds={args.seeds}  score_unit={args.unit}")
-    print(f"{'mode':>14} {'AUC-ROC':>18} {'avg-FP':>16}")
+    print(f"{'mode':>14} {'AUC-ROC':>18} {'avg-FP(99pct)':>18} "
+          f"{'FP@'+str(tpr_pct)+'%TPR':>16} {'recall':>8}")
     for m in modes:
-        a, f = per[m]["auc"], per[m]["fp"]
+        a, f, ft, ac = per[m]["auc"], per[m]["fp"], per[m]["fpt"], per[m]["ach"]
         am = statistics.mean(a)
         asd = statistics.pstdev(a) if len(a) > 1 else 0.0
         fm = statistics.mean(f)
         fsd = statistics.pstdev(f) if len(f) > 1 else 0.0
-        print(f"{m:>14}   {am:.4f} +- {asd:.4f}   {fm:7.1f} +- {fsd:.1f}")
+        ftm = statistics.mean(ft)
+        ftsd = statistics.pstdev(ft) if len(ft) > 1 else 0.0
+        acm = statistics.mean(ac)
+        print(f"{m:>14}   {am:.4f} +- {asd:.4f}   {fm:8.1f} +- {fsd:6.1f}   "
+              f"{ftm:7.1f} +- {ftsd:5.1f}   {acm:6.3f}")
 
 
 if __name__ == "__main__":
