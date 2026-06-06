@@ -21,8 +21,9 @@ cd ~/FALL
 source ~/sdd_activate.sh
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false
 
-DATASET=bgl
-TOK="data/processed/${DATASET}/${DATASET}_tok_8000.json"   # D2 = 8000
+DATASET="${DATASET:-bgl}"      # override: DATASET=thunderbird sbatch scripts/train.sh
+VOCAB="${VOCAB:-8000}"         # re-pin per dataset after the gate's tokenizer sweep
+TOK="data/processed/${DATASET}/${DATASET}_tok_${VOCAB}.json"   # D2
 WIN="data/processed/${DATASET}"
 OUT="results/ckpt/${DATASET}"
 mkdir -p "${OUT}" results/logs

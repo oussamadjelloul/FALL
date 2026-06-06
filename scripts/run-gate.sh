@@ -17,8 +17,8 @@ source ~/sdd_activate.sh
 
 DATASET="${1:-bgl}"
 case "${DATASET}" in
-  bgl)         RAW=data/raw/bgl/BGL.log ;;
-  thunderbird) RAW=data/raw/tbird/Thunderbird.log ;;
+  bgl)         RAW=data/raw/bgl/BGL.log;           NODE_LEVEL=node_card ;;
+  thunderbird) RAW=data/raw/tbird/Thunderbird.log; NODE_LEVEL=full ;;
   *) echo "unknown dataset: ${DATASET}" >&2; exit 1 ;;
 esac
 
@@ -27,9 +27,9 @@ PRE="${PROC_DIR}/${DATASET}_pre.jsonl"
 mkdir -p "${PROC_DIR}" results/logs
 
 echo "==================== 1. preprocess (${DATASET}) ===================="
-# D14: node_card granularity (R0X-MX-NX). Use full for the sensitivity run.
+# D14: node granularity. BGL=node_card (R0X-MX-NX); TB=full (hostname IS node).
 python src/preprocess.py --input "${RAW}" --dataset "${DATASET}" --out "${PRE}" \
-  --node-level node_card
+  --node-level "${NODE_LEVEL}"
 
 echo "==================== 2. gate 3 - tokenizer ===================="
 for V in 8000 12000 16000; do

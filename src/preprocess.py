@@ -69,7 +69,30 @@ def parse_bgl(line):
     return node, ts, (label != "-"), content
 
 
-PARSERS = {"bgl": parse_bgl}
+def parse_thunderbird(line):
+    """Raw loghub Thunderbird.log line -> (node, ts, fail, content) or None.
+    Verified layout (head -3 of Thunderbird.log):
+      Label EpochTs Date Node Month Day Time Loc Component[PID]: Content...
+      - 1131523501 2005.11.09 aadmin1 Nov 10 00:05:01 src@aadmin1 \
+        in.tftpd[14620]: tftp: client does not accept options
+    Node (hostname) is parts[3] and Content is parts[9] -- the SAME column
+    indices as BGL, so split(maxsplit=9) reuses the BGL field map. The
+    component+PID token (parts[8]) stays out of content, matching the BGL
+    treatment (content = message body only). failure = label != '-' (loghub).
+    Node is left at hostname granularity; use --node-level full (D14: TB
+    hostnames are already node-level, unlike BGL's chip-level location)."""
+    parts = line.rstrip("\n").split(maxsplit=9)
+    if len(parts) < 10:
+        return None
+    label, ts_s, node, content = parts[0], parts[1], parts[3], parts[9]
+    try:
+        ts = float(ts_s)
+    except ValueError:
+        return None
+    return node, ts, (label != "-"), content
+
+
+PARSERS = {"bgl": parse_bgl, "thunderbird": parse_thunderbird}
 
 
 def preprocess(path, dataset, node_level="node_card"):
