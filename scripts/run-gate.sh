@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=fall_gate
-#SBATCH --time=1:00:00
+#SBATCH --time=3:00:00
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
+#SBATCH --mem=64G
 #SBATCH --output=results/logs/fall_gate_%j.out
 
 # FALL reproduction - gate 3 (tokenizer) + gate 4 (windowing feasibility).
