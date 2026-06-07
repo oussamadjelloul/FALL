@@ -18,7 +18,7 @@ source ~/sdd_activate.sh
 DATASET="${1:-bgl}"
 case "${DATASET}" in
   bgl)         RAW=data/raw/bgl/BGL.log;           NODE_LEVEL=node_card ;;
-  thunderbird) RAW=data/raw/tbird/Thunderbird.log; NODE_LEVEL=full ;;
+  thunderbird) RAW=data/raw/tbird/Thunderbird.10M.log; NODE_LEVEL=full ;;
   *) echo "unknown dataset: ${DATASET}" >&2; exit 1 ;;
 esac
 
