@@ -3,7 +3,7 @@
 #SBATCH --gres=gpu:a100:1
 #SBATCH --cpus-per-task=6
 #SBATCH --mem=32G
-#SBATCH --time=0:30:00
+#SBATCH --time=3:00:00
 #SBATCH --output=fall-eval-%j.out
 
 # FALL evaluation across all five BGL scenarios (AUC + avg-FP + FP@95%TPR).

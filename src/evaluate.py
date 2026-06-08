@@ -16,11 +16,13 @@ Score unit (length-confound fix):
                       and sharpen over the whole window (1/L leak).
 
 Scoring modes (all from the SAME checkpoints, no retraining):
-  fall          primary (D6: sharpen T=1/2 + top-(1/n) mean)
-  date          baseline B.1.1 (mean of RTD probs)
-  sharpen_only  ablation B.1.2
-  partial_only  ablation B.1.3
-  fall_sum      hedge B.2.2 (top-m sum)
+  fall                primary, Eq.6 summed over sequence tokens (carries 1/L)
+  fall_label          Eq.6 summed over L=2 RTD labels per token (length-invariant)
+  date                baseline B.1.1 (mean of RTD probs)
+  sharpen_only        ablation B.1.2 (== 1/L under the sequence reading)
+  sharpen_label_only  per-token binary-sharpen mean (label-reading diagnostic)
+  partial_only        ablation B.1.3
+  fall_sum            hedge B.2.2 (top-m sum)
 
 Usage:
   python src/evaluate.py --windows-dir data/processed/bgl --scenario s1 \
@@ -98,9 +100,9 @@ def window_segment_probs(model, input_ids, content_len, win_id, n_win, device,
 
 
 def _apply(fn, mode, vec, n, T):
-    if mode in ("fall", "fall_sum"):
+    if mode in ("fall", "fall_sum", "fall_label"):
         return fn(vec, n=n, T=T)
-    if mode == "sharpen_only":
+    if mode in ("sharpen_only", "sharpen_label_only"):
         return fn(vec, T=T)
     if mode == "partial_only":
         return fn(vec, n=n)
@@ -172,7 +174,12 @@ def main():
     ap.add_argument("--tokenizer", required=True)
     ap.add_argument("--ckpt-dir", required=True)
     ap.add_argument("--seeds", default="0,1,2")
-    ap.add_argument("--modes", default="fall,date,sharpen_only,partial_only")
+    ap.add_argument("--modes",
+                    default="fall,fall_label,date,sharpen_only,"
+                            "sharpen_label_only,partial_only",
+                    help="comma list; fall/sharpen_only read Eq.6 over the "
+                         "sequence (1/L), fall_label/sharpen_label_only read it "
+                         "over the L=2 labels (length-invariant)")
     ap.add_argument("--score-unit", dest="unit", default="segment",
                     choices=["segment", "pooled"],
                     help="segment (fix, default) or pooled (old, length-leaking)")

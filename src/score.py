@@ -9,16 +9,33 @@ FALL score (D6): mean of the top-(1/n) sharpened probabilities.
   sharpen(p, T)_i = p_i^(1/T) / sum_j p_j^(1/T)        (Eq. 6, T=1/2)
   m = floor(L / n)  (n=4) ; score = (n/m) * sum(top-m sharpened) = n * mean(top-m)
 The constant n is harmless (global), so ranking == mean of top-(1/n) sharpened.
+
+Eq. 6 is read two ways (the sum index L is ambiguous in the paper):
+  sequence reading - sum over the L tokens of the window (`sharpen`). The
+                     sharpened vector sums to 1, so the score carries a 1/L
+                     length factor -> inverts where failures are longer
+                     (Thunderbird). This is the literal-symbol reading.
+  label reading    - sum over the L=2 RTD labels {replaced, original} per token
+                     (`sharpen_label`). The paper text says "L = number of
+                     labels"; this is length-invariant. Modes `fall_label` /
+                     `sharpen_label_only`.
 """
 from __future__ import annotations
 
 import torch
 
 
-def sharpen(probs, T=0.5):
+def sharpen(probs, T=0.5):                          # Eq.6 over the L sequence tokens
     p = probs.clamp_min(1e-12)
     w = p ** (1.0 / T)
     return w / w.sum().clamp_min(1e-12)
+
+
+def sharpen_label(probs, T=0.5):                    # Eq.6 over the L=2 RTD labels
+    p = probs.clamp(1e-12, 1.0 - 1e-12)             # per-token {replaced, original}
+    a = p ** (1.0 / T)
+    b = (1.0 - p) ** (1.0 / T)
+    return a / (a + b)                              # in (0,1), no cross-token coupling
 
 
 def fall_score(probs, n=4, T=0.5):                 # primary (D6)
@@ -55,10 +72,25 @@ def fall_sum_score(probs, n=4, T=0.5):              # B.2.2 hedge: top-m SUM (no
     return torch.topk(s, m).values.sum().item()
 
 
+def fall_label_score(probs, n=4, T=0.5):            # extension: FALL, label sharpening
+    L = probs.numel()
+    if L == 0:
+        return 0.0
+    s = sharpen_label(probs, T)
+    m = max(1, L // n)
+    return (n / m) * torch.topk(s, m).values.sum().item()
+
+
+def sharpen_label_only_score(probs, T=0.5):         # label-reading analogue of B.1.2
+    return sharpen_label(probs, T).mean().item() if probs.numel() else 0.0
+
+
 SCORERS = {
     "fall": fall_score,
+    "fall_label": fall_label_score,
     "date": date_score,
     "sharpen_only": sharpen_only_score,
+    "sharpen_label_only": sharpen_label_only_score,
     "partial_only": partial_only_score,
     "fall_sum": fall_sum_score,
 }
